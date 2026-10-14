@@ -30,7 +30,7 @@ def test_smooth_warburg_not_interference():
 def test_disturbed_band_does_not_change_endpoint_or_parameters():
     f = np.logspace(5,-2,75)
     clean = impedance(f,12,240,2e-4,.85)
-    band = (f>=10)&(f<=300)
+    band = (f>=30)&(f<=300)
     area = np.flatnonzero((f>=30)&(f<=150))
     tangent = np.gradient(clean,np.log(f))
     normal = 1j*tangent/abs(tangent)
@@ -59,3 +59,35 @@ def test_single_large_off_curve_point_is_removed_without_masking_neighbors():
     r = analyze(make(f,z))
     assert r.noise_indices.tolist()==[index]
     assert index-1 in r.used and index+1 in r.used
+
+
+def test_moderate_off_curve_point_removed_and_small_deviation_kept():
+    f = np.logspace(5,-2,75)
+    clean = impedance(f,12,240,2e-4,.85)
+    tangent = np.gradient(clean,np.log(f))
+    normal = 1j*tangent/abs(tangent)
+    strong = np.argmin(abs(f-50))
+    small = np.argmin(abs(f-150))
+    anchor = np.argmin(abs(f-100))
+    z = clean.copy()
+    z[strong] += .025*abs(clean[strong])*normal[strong]
+    z[small] += .008*abs(clean[small])*normal[small]
+    # A clear outlier establishes a local scatter episode; tighten the model
+    # distance check within that episode without classifying smooth curvature.
+    z[anchor] += .12*abs(clean[anchor])*normal[anchor]
+    r = analyze(make(f,z))
+    assert r.noise_indices.tolist()==sorted([strong,anchor])
+    assert small in r.used
+    assert strong-1 in r.used and strong+1 in r.used
+    assert r.fit.rp==pytest.approx(240,rel=.01)
+
+
+@pytest.mark.parametrize('manual',[False,True])
+def test_interference_exclusion_stays_within_30_300_hz(manual):
+    f = np.sort(np.r_[np.logspace(5,-2,75),29.9,30.,300.,300.1])[::-1]
+    z = impedance(f,12,240,2e-4,.85)
+    disturbed = np.flatnonzero(np.isin(f,[29.9,30.,300.,300.1]))
+    z[disturbed] -= .2j*abs(z[disturbed])
+    r = detect_interference(make(f,z),(0,len(f)-1) if manual else None)
+    excluded_f = f[r.excluded]
+    assert set(excluded_f)=={30.,300.}

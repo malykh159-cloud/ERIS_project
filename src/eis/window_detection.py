@@ -19,7 +19,7 @@ def analyze(spectrum, manual=None, cancelled=lambda: False):
     if len(interference.excluded):
         result.reasons.append(f"Возможные сетевые наводки {C.INTERFERENCE_HIGH_HZ:g}–{C.INTERFERENCE_LOW_HZ:g} Гц: исключено {len(interference.excluded)} отдельных точек, отклоняющихся от модельной линии более чем на {interference.threshold:.1%} относительно |Z|. Остальные точки диапазона сохранены.")
     elif len(interference.suspects):
-        result.reasons.append('Локальный разброс 300–10 Гц отмечен; существенные выбросы относительно опорной линии не подтверждены. Точки не исключены как наводки.')
+        result.reasons.append(f'Локальный разброс {C.INTERFERENCE_HIGH_HZ:g}–{C.INTERFERENCE_LOW_HZ:g} Гц отмечен; существенные выбросы относительно опорной линии не подтверждены. Точки не исключены как наводки.')
     if interference.warning:
         result.reasons.append(interference.warning)
     if manual is not None:

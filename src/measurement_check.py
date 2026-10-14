@@ -51,6 +51,8 @@ def run_measurement_check(app,window,source,destination):
         if np.any(r.spectrum.frequency[r.spectrum.eligible]<=C.AUTO_BOUNDARY_MAX_HZ):
             assert min(f)<=C.AUTO_BOUNDARY_MAX_HZ
         assert not np.any(np.isin(r.used,r.noise_indices))
+        noise_f = r.spectrum.frequency[r.noise_indices]
+        assert np.all((noise_f>=C.INTERFERENCE_LOW_HZ)&(noise_f<=C.INTERFERENCE_HIGH_HZ))
         rows.append({'filename':r.path.name,'sha256':hashes[str(r.path)],'status':r.status,
                      'points_imported':len(r.spectrum.z),'points_used':len(r.used),
                      'fit_start_hz':float(max(f)),'fit_end_hz':float(min(f)),
