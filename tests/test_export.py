@@ -6,6 +6,13 @@ from eis.types import Result,Fit
 from eis.exporter import export_summary,HEADERS
 
 
+def test_dotted_report_name_is_preserved(tmp_path):
+    result = Result(tmp_path/'measurement.txt', status='Не обработан')
+    paths = export_summary([result], tmp_path/'Summary.v1', ['xlsx', 'csv', 'txt'])
+    assert [p.name for p in paths] == ['Summary.v1.xlsx', 'Summary.v1.csv', 'Summary.v1.txt']
+    assert not (tmp_path/'Summary.xlsx').exists()
+
+
 def test_export_all_formats_and_precision(tmp_path):
     f = Fit(np.array([12.123456789,240.987654321,1e-4,.85]), np.array([.12,1.23,1e-5,.01]),
             1.23456789e-7,np.zeros(12,complex),10,False)

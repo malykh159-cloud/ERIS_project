@@ -11,6 +11,12 @@ HEADERS = ['Filename', 'Rs_Ohm', 'Rs_SE_Ohm', 'Rp_Ohm', 'Rp_SE_Ohm',
            'f_max_Hz', 'f_max_SE_Hz', 'Chi2', 'Points_Used', 'Status']
 
 
+def export_path(destination, fmt):
+    """Append an extension without truncating dots in the user-provided base name."""
+    destination = Path(destination)
+    return destination.parent / (destination.name + '.' + fmt)
+
+
 def summary_row(result):
     f = result.fit
     return [result.path.name, f.rs if f else None,
@@ -29,7 +35,7 @@ def export_summary(results, destination, formats):
     rows = [summary_row(r) for r in results]
     paths = []
     for fmt in formats:
-        path = destination.with_suffix('.' + fmt)
+        path = export_path(destination, fmt)
         with NamedTemporaryFile(dir=path.parent, suffix='.' + fmt, delete=False) as tmp:
             temp_path = Path(tmp.name)
         try:

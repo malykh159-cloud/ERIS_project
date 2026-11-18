@@ -1,12 +1,103 @@
-"""Sequential CNLS windows plus prospective residuals against the preceding fit."""
+"""Select the one-arc fitting window and document low-frequency exclusions."""
 import numpy as np
+from scipy.signal import find_peaks
 from .fitter import fit_arc
 from .model import impedance
 from .types import Result
-from .quality import assess
-from .interference import detect_interference
-from .geometry import tail_candidate
+from .quality import assess, requires_far_extrapolation
+from .interference import detect_interference, local_deviation
+from .geometry import tail_candidates
 from . import config as C
+
+
+def relative_residual(f, z, fit):
+    return (z - impedance(f, *fit.params)) / np.maximum(abs(z), np.finfo(float).tiny)
+
+
+def residual_threshold(values, floor, sigmas=C.DETECTION_SIGMAS):
+    values = abs(values)
+    center = np.median(values)
+    mad = C.MAD_SCALE * np.median(abs(values - center))
+    return max(floor, center + sigmas * mad)
+
+
+def confirmed_tail_start(f, z, get_fit, *, allow_shoulder=False):
+    checked = set()
+    for candidate in tail_candidates(f, z, allow_shoulder=allow_shoulder):
+        if candidate in checked:
+            continue
+        checked.add(candidate)
+        fit = get_fit(candidate)
+        threshold = residual_threshold(fit.residual[-C.HISTORY_POINTS:], C.TAIL_RESIDUAL_FLOOR)
+        residual = relative_residual(f[candidate:candidate + C.TAIL_CHECK_POINTS],
+                                     z[candidate:candidate + C.TAIL_CHECK_POINTS], fit)
+        for offset in range(len(residual) - C.CONFIRM_POINTS + 1):
+            group = residual[offset:offset + C.CONFIRM_POINTS]
+            if (np.all(abs(group) > threshold)
+                    and abs(np.sum(group)) >= C.TAIL_RESIDUAL_ALIGNMENT * np.sum(abs(group))):
+                return candidate + offset
+    return None
+
+
+def gradual_tail_starts(f, z, get_fit, current_end):
+    """Look back for the start of a growing deviation confirmed farther down."""
+    for candidate in dict.fromkeys(tail_candidates(f, z, allow_shoulder=True)):
+        if candidate >= current_end:
+            continue
+        fit = get_fit(candidate)
+        background = fit.residual[-C.HISTORY_POINTS:]
+        threshold = residual_threshold(background, C.TAIL_RESIDUAL_FLOOR)
+        early_threshold = residual_threshold(background, C.TAIL_RESIDUAL_FLOOR,
+                                             C.TAIL_GRADUAL_SIGMAS)
+        residual = relative_residual(f[candidate:], z[candidate:], fit)
+        magnitude = abs(residual)
+        for offset in range(min(current_end - candidate, len(residual)) - C.CONFIRM_POINTS + 1):
+            group = residual[offset:offset + C.CONFIRM_POINTS]
+            levels = magnitude[offset:offset + C.CONFIRM_POINTS]
+            if (np.all(levels > early_threshold) and np.all(np.diff(levels) > 0)
+                    and abs(np.sum(group)) >= C.TAIL_RESIDUAL_ALIGNMENT * np.sum(levels)
+                    and np.any(magnitude[offset:offset + C.TAIL_GRADUAL_CONFIRM_WINDOW] > threshold)):
+                yield candidate + offset
+
+
+def unstable_tail_start(f, z, get_fit):
+    """Find a sustained cluster of irregular points beyond a usable arc prefix."""
+    deviation, valid = local_deviation(f, z)
+    scatter = np.r_[0.0, np.where(valid, deviation, 0.0), 0.0]
+    width = C.UNSTABLE_TAIL_WINDOW
+    for start in range(C.MIN_POINTS, len(f) - width + 1):
+        if f[start - 1] > C.AUTO_BOUNDARY_MAX_HZ:
+            continue
+        stop = start + width
+        threshold_local = residual_threshold(scatter[max(0, start - C.HISTORY_POINTS):start],
+                                             C.UNSTABLE_TAIL_LOCAL_FLOOR)
+        irregular = scatter[start:stop] > threshold_local
+        if np.count_nonzero(irregular) < C.CONFIRM_POINTS:
+            continue
+        # Leave a buffer so the first irregular points cannot pull the reference
+        # toward the low-frequency cluster before it is confirmed.
+        fit = get_fit(max(C.MIN_POINTS, start - width))
+        threshold = residual_threshold(fit.residual[-C.HISTORY_POINTS:], C.UNSTABLE_TAIL_MODEL_FLOOR)
+        disagreement = abs(relative_residual(f[start:stop], z[start:stop], fit)) > threshold
+        confirmed = np.flatnonzero(irregular & disagreement)
+        if len(confirmed) >= C.CONFIRM_POINTS:
+            quiet = scatter[stop:-1] <= threshold_local
+            if len(quiet) >= width and np.any(
+                    np.all(np.lib.stride_tricks.sliding_window_view(quiet, width), axis=1)):
+                continue
+            return start + int(confirmed[0])
+    return None
+
+
+def isolated_suspects(f, z, fit):
+    deviation, valid = local_deviation(f, z)
+    if not np.any(valid):
+        return np.array([], dtype=int)
+    local_limit = residual_threshold(deviation[valid], C.UNSTABLE_TAIL_LOCAL_FLOOR)
+    error = abs(fit.residual)
+    model_limit = residual_threshold(error, C.UNSTABLE_TAIL_MODEL_FLOOR)
+    isolated = (error[1:-1] > model_limit) & (error[:-2] <= model_limit) & (error[2:] <= model_limit)
+    return np.flatnonzero(valid & (deviation > local_limit) & isolated) + 1
 
 
 def analyze(spectrum, manual=None, cancelled=lambda: False):
@@ -17,9 +108,9 @@ def analyze(spectrum, manual=None, cancelled=lambda: False):
     result.noise_threshold = interference.threshold if len(interference.excluded) else None
     eligible = np.setdiff1d(spectrum.eligible,interference.excluded)
     if len(interference.excluded):
-        result.reasons.append(f"Возможные сетевые наводки {C.INTERFERENCE_HIGH_HZ:g}–{C.INTERFERENCE_LOW_HZ:g} Гц: исключено {len(interference.excluded)} отдельных точек, отклоняющихся от модельной линии более чем на {interference.threshold:.1%} относительно |Z|. Остальные точки диапазона сохранены.")
+        result.notes.append(f"Возможные сетевые наводки {C.INTERFERENCE_HIGH_HZ:g}–{C.INTERFERENCE_LOW_HZ:g} Гц: исключено {len(interference.excluded)} отдельных точек, отклоняющихся от модельной линии более чем на {interference.threshold:.1%} относительно |Z|. Остальные точки диапазона сохранены.")
     elif len(interference.suspects):
-        result.reasons.append(f'Локальный разброс {C.INTERFERENCE_HIGH_HZ:g}–{C.INTERFERENCE_LOW_HZ:g} Гц отмечен; существенные выбросы относительно опорной линии не подтверждены. Точки не исключены как наводки.')
+        result.notes.append(f'Локальный разброс {C.INTERFERENCE_HIGH_HZ:g}–{C.INTERFERENCE_LOW_HZ:g} Гц отмечен; существенные выбросы относительно опорной линии не подтверждены. Точки не исключены как наводки.')
     if interference.warning:
         result.reasons.append(interference.warning)
     if manual is not None:
@@ -31,6 +122,7 @@ def analyze(spectrum, manual=None, cancelled=lambda: False):
         result.reasons.append(f"Осталось {len(f)} точек; требуется минимум {C.MIN_POINTS}.")
         return result
     try:
+        second_arc = False
         if manual is not None:
             best = fit_arc(f, z)
             result.used = eligible
@@ -38,99 +130,85 @@ def analyze(spectrum, manual=None, cancelled=lambda: False):
             shorter = fit_arc(f[:-step], z[:-step], best.params) if len(f) >= C.MIN_POINTS + step else best
             drift = abs(shorter.rp / best.rp - 1)
         else:
-            fits, errors, history, bad_start, streak = {}, [], [], None, 0
-            last_good = len(f)
-            boundary_found = False
-            seed = None
             crossed_guard = bool(np.any(f <= C.AUTO_BOUNDARY_MAX_HZ))
-            # Use quiet anchors to check the shape when interference was observed.
-            # Good band points STILL participate in every candidate CNLS and final
-            # fit; only slope-based boundary corroboration ignores their jitter.
-            shape = eligible
-            if len(interference.suspects):
-                shape = eligible[(spectrum.frequency[eligible]>C.INTERFERENCE_HIGH_HZ)|
-                                 (spectrum.frequency[eligible]<C.INTERFERENCE_LOW_HZ)]
-            shape_end = tail_candidate(spectrum.frequency[shape],spectrum.z[shape])
-            geometric_end = int(np.searchsorted(eligible,shape[shape_end-1],side='right')) if shape_end is not None else None
-            # Every endpoint is evaluated; prefix length is never selected using geometry alone.
-            for k in range(C.MIN_POINTS, len(f) + 1):
+            fits = {}
+
+            def get_fit(end):
                 if cancelled():
                     raise InterruptedError("Обработка отменена.")
-                fit = fit_arc(f[:k], z[:k], seed)
-                fits[k] = fit
-                seed = fit.params
-                diagnostic = {"points": k, "chi2": fit.chi2, "rp": fit.rp,
-                              "rp_se": None if fit.se is None else float(fit.se[1]),
-                              "condition": fit.condition, "boundary": fit.boundary,
-                              "end_frequency_hz": float(f[k - 1]),
-                              "boundary_search_enabled": bool(f[k - 1] <= C.AUTO_BOUNDARY_MAX_HZ),
-                              "tail_candidate_points": geometric_end}
-                result.candidates.append(diagnostic)
-                if k > C.MIN_POINTS:
-                    previous = fits[k - 1]
-                    prospective = abs((z[k - 1] - impedance(f[k - 1], *previous.params)) / abs(z[k - 1]))
-                    errors.append(float(prospective))
-                    base = np.asarray(history[-C.HISTORY_POINTS:])
-                    if len(base) >= C.MIN_HISTORY:
-                        med = float(np.median(base))
-                        mad = C.MAD_SCALE * float(np.median(abs(base - med)))
-                        limit = max(med * C.DETECTION_RATIO, med + C.DETECTION_SIGMAS * mad,
-                                    C.NOISE_FLOOR)
-                        # Persistent NEW point disagreement, together with growth in reduced loss.
-                        log_history = [np.log10(max(fits[t].chi2, C.NOISE_FLOOR**2))
-                                       for t in range(max(C.MIN_POINTS, k - C.HISTORY_POINTS), k)]
-                        log_base = float(np.median(log_history))
-                        log_mad = C.MAD_SCALE * float(np.median(abs(np.array(log_history) - log_base)))
-                        chi_growth = np.log10(max(fit.chi2, C.NOISE_FLOOR**2)) > log_base + max(np.log10(C.CHI_GROWTH_RATIO), C.CHI_GROWTH_MAD_MULTIPLIER * log_mad)
-                        # Prefix ending BEFORE the newly added point must itself have
-                        # crossed 2 kHz. Reset the streak above this guard so earlier
-                        # high-frequency distortions cannot later trigger a cutoff.
-                        # A shape transition must corroborate model disagreement:
-                        # an imperfect single-CPE fit on the rising arc alone must
-                        # not cut the spectrum before the actual tail transition.
-                        endpoint_allowed = (f[k - 2] <= C.AUTO_BOUNDARY_MAX_HZ and
-                                            geometric_end is not None and k-1 >= geometric_end)
-                        bad = endpoint_allowed and prospective > limit and (chi_growth or streak > 0)
-                        if bad:
-                            if streak == 0:
-                                bad_start = k - 1
-                            streak += 1
-                        else:
-                            streak, bad_start = 0, None
-                            history.append(float(prospective))
-                        if streak >= C.CONFIRM_POINTS:
-                            last_good = min(bad_start,geometric_end+C.ENDPOINT_STABILITY_STEP)
-                            boundary_found = True
-                            break
-                    else:
-                        history.append(float(prospective))
-                if geometric_end is not None and k >= geometric_end+C.CONFIRM_POINTS:
-                    if not boundary_found:
-                        last_good = geometric_end
-                        boundary_found = True
-                        result.reasons.append("Перегиб к низкочастотному хвосту обнаружен, но граница по CNLS неоднозначна; проверьте диапазон вручную.")
-                    break
-            best = fits[last_good]
+                if end not in fits:
+                    fit = fits[end] = fit_arc(f[:end], z[:end])
+                    result.candidates.append({
+                        "points": end, "chi2": fit.chi2, "rp": fit.rp,
+                        "end_frequency_hz": float(f[end - 1]),
+                    })
+                return fits[end]
+
+            unstable = unstable_tail_start(f, z, get_fit)
+            shape_end = len(f) if unstable is None else unstable
+            tail = confirmed_tail_start(f[:shape_end], z[:shape_end], get_fit)
+            last_good = shape_end if tail is None else tail
+
+            def fit_and_drift(end):
+                fit = get_fit(end)
+                shorter = end - C.ENDPOINT_STABILITY_STEP
+                drift = abs(get_fit(shorter).rp / fit.rp - 1) if shorter >= C.MIN_POINTS else 0.0
+                return fit, drift
+
+            best, drift = fit_and_drift(last_good)
+            if requires_far_extrapolation(best, z[:last_good]):
+                shoulder = confirmed_tail_start(f[:shape_end], z[:shape_end], get_fit, allow_shoulder=True)
+                if shoulder is not None and shoulder < last_good:
+                    alternative, alternative_drift = fit_and_drift(shoulder)
+                    if not assess(alternative, f[:shoulder], z[:shoulder], alternative_drift):
+                        tail = last_good = shoulder
+                        best, drift = alternative, alternative_drift
+                        result.notes.append("Граница уточнена по плечу дуги: исходный диапазон требовал далёкой экстраполяции Rp.")
+            if tail is None or best.chi2 > C.MAX_CHI2:
+                for end in gradual_tail_starts(f[:shape_end], z[:shape_end], get_fit, last_good):
+                    alternative, alternative_drift = fit_and_drift(end)
+                    if (alternative.chi2 < best.chi2 * C.TAIL_GRADUAL_MAX_CHI2_RATIO
+                            and not assess(alternative, f[:end], z[:end], alternative_drift)):
+                        tail = last_good = end
+                        best, drift = alternative, alternative_drift
+                        result.notes.append("Граница уточнена по постепенному росту отклонения от дуги.")
+                        break
             result.used = eligible[:last_good]
-            neighbor = fits.get(last_good - C.ENDPOINT_STABILITY_STEP, best)
-            drift = abs(neighbor.rp / best.rp - 1)
-            if boundary_found:
-                result.reasons.append(f"Низкочастотные точки исключены после устойчивого ухудшения CNLS; конец дуги {f[last_good - 1]:.6g} Гц (не выше {C.AUTO_BOUNDARY_MAX_HZ:g} Гц).")
-            elif streak or (best.chi2 > C.MAX_CHI2):
-                result.reasons.append("Граница дуги неоднозначна; проверьте диапазон вручную.")
+            suspects = isolated_suspects(f[:last_good], z[:last_good], best)
+            if len(suspects):
+                frequencies = ', '.join(f'{value:.6g}' for value in f[suspects[:8]])
+                suffix = ' и другие' if len(suspects) > 8 else ''
+                result.notes.append(
+                    f"Отдельные подозрительные точки оставлены в подгонке: {frequencies} Гц{suffix}."
+                )
+            if tail is not None:
+                result.notes.append(
+                    f"Низкочастотный хвост исключён по изменению наклона и согласованному "
+                    f"отклонению от модели; конец дуги {f[tail - 1]:.6g} Гц."
+                )
+                height = -z[tail:shape_end].imag
+                prominence = C.SECOND_ARC_PROMINENCE_REL * np.ptp(z[:tail].imag)
+                peaks, _ = find_peaks(height, prominence=prominence, width=2)
+                second_arc = bool(len(peaks))
+            if unstable is not None:
+                result.unstable_indices = eligible[unstable:]
+                result.notes.append(
+                    f"Нестабильный низкочастотный участок: {len(result.unstable_indices)} точек "
+                    f"от {f[unstable]:.6g} до {f[-1]:.6g} Гц вне подгонки."
+                )
+            if tail is None and unstable is None and best.chi2 > C.MAX_CHI2:
+                result.notes.append("Устойчивый конец дуги не найден; использован доступный диапазон.")
         result.fit = best
-        warnings = assess(best, spectrum.frequency[result.used], spectrum.z[result.used], drift)
+        warnings = assess(best, spectrum.frequency[result.used], spectrum.z[result.used], drift, result.notes)
+        if second_arc:
+            warnings.append("За границей подгонки есть отдельный максимум; возможна вторая дуга.")
         if interference.warning:
             warnings.append('Отбор сетевых выбросов не подтверждён моделью; проверьте точки вручную.')
-        if len(interference.excluded):
-            warnings.append("Часть спектра исключена из-за возможных сетевых наводок; проверьте оставшийся диапазон.")
         if manual is None and not crossed_guard:
             warnings.append(f"Спектр не достигает {C.AUTO_BOUNDARY_MAX_HZ:g} Гц; автоматический конец дуги не определён.")
-        if manual is None and any("неоднозначна" in s for s in result.reasons):
-            warnings.append("Автоматическая граница не подтверждена.")
-        # Excluded tail is not asserted to be physically Warburg: model mismatch can be a second arc.
+        # Automatic exclusions remain documented; numeric quality controls acceptance.
         if manual is None and len(result.used) < len(eligible):
-            warnings.append("Автоматическая граница предполагает одну дугу; проверьте исключённый участок.")
+            result.notes.append("Обработан участок одной дуги; низкочастотная часть сохранена на графике и не входит в fit.")
         result.reasons.extend(warnings)
         result.status = "Проверьте диапазон" if warnings else "OK"
     except InterruptedError:

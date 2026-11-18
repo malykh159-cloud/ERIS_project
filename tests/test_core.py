@@ -73,6 +73,24 @@ def test_single_outlier_not_boundary():
     assert len(r.used) == len(f)
 
 
+def test_unstable_terminal_cluster_below_interference_band():
+    f, z = sample(count=75)
+    z[-7:] += np.array([.17, -.35, .4, -.44, .5, -.4, .27]) * abs(z[-7:])
+    s = spectrum(f, z)
+    before = z.copy()
+    result = analyze(s)
+    assert result.used.tolist() == list(range(len(f) - 7))
+    assert result.unstable_indices.tolist() == list(range(len(f) - 7, len(f)))
+    assert max(f[result.unstable_indices]) < 30
+    assert len(result.noise_indices) == 0
+    assert result.fit.rp == pytest.approx(240, rel=0.01)
+    assert np.array_equal(s.z, before)
+
+    manual = analyze(s, (0, len(f) - 1))
+    assert len(manual.used) == len(f)
+    assert len(manual.unstable_indices) == 0
+
+
 def test_manual_excludes_both_ends():
     f, z = sample()
     r = analyze(spectrum(f, z), (8, 45))

@@ -74,6 +74,61 @@ def run_smoke(app,window,destination):
     wb = load_workbook(destination/'Summary.xlsx')
     assert wb.sheetnames==['Summary'] and wb.active.max_row==4
     wb.close()
+    # Exercise the selected-export button in source AND frozen builds. Capture the
+    # records before the save dialogs, then verify their real table/PNG exporters.
+    from PySide6.QtCore import QItemSelectionModel
+    from PySide6.QtWidgets import QPushButton
+    import csv
+    window.table.setCurrentCell(1,0)
+    window.table.clearSelection()
+    mode = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+    for row in (0,2):
+        window.table.selectionModel().select(window.table.model().index(row,0),mode)
+    selected = []
+    original_export = window.export_results
+    try:
+        window.export_results = lambda results,title: selected.extend(results)
+        button = next(b for b in window.findChildren(QPushButton)
+                      if b.text() == 'Экспортировать выбранные')
+        button.click()
+        assert selected == [window.results[0],window.results[2]]
+        window.table.clearSelection()
+        button.click()
+        assert len(selected) == 2
+    finally:
+        window.export_results = original_export
+    selected_dir = destination/'selected'
+    selected_dir.mkdir(exist_ok=True)
+    export_summary(selected,selected_dir/'Summary.v1',['xlsx','csv','txt'])
+    export_plots(selected,selected_dir/'plots')
+    assert len(list((selected_dir/'plots').glob('*.png'))) == 1
+    with (selected_dir/'Summary.v1.csv').open(encoding='utf-8-sig',newline='') as stream:
+        assert [r[0] for r in list(csv.reader(stream))[1:]] == [paths[0].name,paths[2].name]
+    (destination/'selected_export_verification.json').write_text(
+        json.dumps({'selected_rows':[0,2], 'current_row_not_exported':1,
+                    'table_records':2, 'png_count':1, 'dotted_report_name_preserved':True},indent=2),
+        encoding='utf-8')
+    unmapped = destination/'synthetic_unmapped.txt'
+    unmapped.write_text('1000 12 -1\n100 20 -3\n10 30 -2',encoding='utf-8')
+    paths.append(unmapped)
+    hashes[str(unmapped)] = hashlib.sha256(unmapped.read_bytes()).hexdigest()
+    pending_row = len(window.results)
+    window.add_paths([unmapped])
+    original_mapping = window.map_columns
+    try:
+        window.map_columns = lambda table: window.cancel()
+        window.process_rows([pending_row])
+        wait()
+        assert window.results[pending_row].status == 'Не обработан'
+        assert 'отменена' in window.statusBar().currentMessage()
+    finally:
+        window.map_columns = original_mapping
+    window.table.clearSelection()
+    window.table.selectRow(pending_row)
+    window.remove_selected()
+    (destination/'cancellation_verified.json').write_text(
+        json.dumps({'cancel_while_mapping':True,'pending_row_preserved':True,
+                    'completed_results_preserved':len(window.results)==3}),encoding='utf-8')
     assert hashes == {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
     app.processEvents()
     window.table.setCurrentCell(1,0)

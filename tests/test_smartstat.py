@@ -12,11 +12,15 @@ FILES = sorted((Path(__file__).resolve().parents[1]/'data_test').glob('*.txt'))
 def test_actual_smartstat_export(path):
     before = hashlib.sha256(path.read_bytes()).hexdigest()
     table = inspect_text(path)
-    assert table.headers==['N','F, Гц','Re, Ом','Im, Ом']
-    assert table.encoding=='cp1251'
+    smartstat = table.headers==['N','F, Гц','Re, Ом','Im, Ом']
+    if smartstat:
+        assert table.encoding=='cp1251'
+    else:
+        assert table.headers[:4]==['Index','Frequency (Hz)',"Z' (Ω)","-Z'' (Ω)"]
+        assert table.encoding=='utf-8-sig'
     assert table.mapping.negative_imag
     spectrum = read_spectrum(path)
-    assert len(spectrum.z)==len(path.read_bytes().decode('cp1251').splitlines())-1
+    assert len(spectrum.z)==len(path.read_bytes().decode(table.encoding).splitlines())-1
     first = np.array([float(v.replace(',','.')) for v in table.rows[0]])
     assert spectrum.frequency[0]==first[1]
     assert spectrum.z[0].real==first[2]

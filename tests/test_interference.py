@@ -44,7 +44,7 @@ def test_disturbed_band_does_not_change_endpoint_or_parameters():
         assert np.any(np.isin(result.used,np.flatnonzero(band)))
         assert result.fit.rs==pytest.approx(12,rel=.01)
         assert result.fit.rp==pytest.approx(240,rel=.01)
-        assert any('сетевые' in reason for reason in result.reasons)
+        assert any('сетевые' in note for note in result.notes)
         results.append(result)
     assert results[0].used.tolist()==results[1].used.tolist()
     assert results[0].fit.rs==pytest.approx(results[1].fit.rs,rel=1e-9)

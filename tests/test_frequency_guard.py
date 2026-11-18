@@ -1,5 +1,6 @@
 from pathlib import Path
 import numpy as np
+import pytest
 from eis.model import impedance
 from eis.types import Spectrum
 from eis.window_detection import analyze
@@ -41,3 +42,20 @@ def test_apex_is_not_end_of_clean_arc():
     f = np.logspace(5,-2,75)
     z = impedance(f,12,240,2e-4,.85)
     assert tail_candidate(f,z) is None
+
+
+@pytest.mark.parametrize('manual', [None, (0, 20)])
+def test_100khz_cutoff_preserves_raw_points_and_fit(manual):
+    f = np.r_[1e6, 100000.1, 100000., np.geomspace(50000, 1, 18)]
+    z = impedance(f, 12, 240, 2e-4, .85)
+    z[:2] = [1e8-1e8j, 1e7-1e7j]
+    s = make(f, z)
+    before = s.z.copy()
+    result = analyze(s, manual)
+    assert result.fit is not None
+    assert not np.any(np.isin(result.used, [0, 1]))
+    assert 2 in result.used  # Exactly 100 kHz is retained.
+    assert result.fit.rs == pytest.approx(12, rel=1e-5)
+    assert result.fit.rp == pytest.approx(240, rel=1e-5)
+    assert np.array_equal(s.z, before)
+    assert len(s.frequency) == len(f)

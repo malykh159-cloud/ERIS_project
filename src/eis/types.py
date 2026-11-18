@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import numpy as np
 from .derived import arc_characteristics
+from . import config as C
 
 
 @dataclass
@@ -14,7 +15,8 @@ class Spectrum:
 
     @property
     def eligible(self):
-        return np.flatnonzero(self.valid & (self.z.imag <= 0))
+        return np.flatnonzero(self.valid & (self.z.imag <= 0) &
+                              (self.frequency <= C.MAX_FIT_FREQUENCY_HZ))
 
 
 @dataclass
@@ -74,3 +76,5 @@ class Result:
     noise_indices: np.ndarray = field(default_factory=lambda: np.array([],dtype=int))
     noise_suspects: np.ndarray = field(default_factory=lambda: np.array([],dtype=int))
     noise_threshold: float | None = None
+    notes: list[str] = field(default_factory=list)
+    unstable_indices: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))

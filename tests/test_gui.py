@@ -4,19 +4,67 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PySide6.QtWidgets import QApplication,QPushButton
-from PySide6.QtCore import QEventLoop,QTimer,QItemSelectionModel
+from PySide6.QtCore import QEventLoop,QTimer,QItemSelectionModel,QCoreApplication,QEvent
 from eis.parser import read_spectrum,inspect_text
 from eis.window_detection import analyze
 from ui.window import MainWindow
 from ui.dialogs import MappingDialog
 from ui.plotting import export_plots
 from eis.types import Result,Fit
+from eis.types import Spectrum
+from ui.plotting import NyquistPlot
+import pyqtgraph as pg
 from eis.exporter import export_summary,summary_row
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture(scope='session')
 def app():
-    return QApplication.instance() or QApplication([])
+    application = QApplication.instance() or QApplication([])
+    # Keep the application alive through pyqtgraph's atexit cleanup as well.
+    pg.mkQApp()
+    yield application
+    # Drain offscreen widgets/deferred deletes while QApplication is still alive.
+    # Otherwise native Qt objects can outlive it and crash at interpreter shutdown.
+    import gc
+    pg.cleanup()
+    application.closeAllWindows()
+    gc.collect()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    application.processEvents()
+
+
+@pytest.fixture(autouse=True)
+def drain_gui_objects(app):
+    yield
+    # Collect Qt reference cycles on the GUI thread, before the next worker starts.
+    import gc
+    for widget in app.topLevelWidgets():
+        if isinstance(widget, MainWindow) and widget.plot.plotItem is not None:
+            widget.plot.close()
+    gc.collect()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+
+
+def test_point_hover_includes_excluded_frequencies(app):
+    plot = NyquistPlot()
+    plot.resize(800, 600)
+    plot.show()
+    s = Spectrum(Path('hover.txt'), np.array([200000., 100000., 1000., 10.]),
+                 np.array([1-1j, 2-2j, 3-3j, 4+1j]), np.ones(4, bool))
+    plot.show_result(Result(s.path, spectrum=s))
+    groups = [item for item in plot.plotItem.items if isinstance(item, pg.ScatterPlotItem)]
+    assert sorted(float(p.data()) for g in groups for p in g.points()) == [10., 1000., 100000., 200000.]
+    assert all(g.opts['hoverable'] for g in groups)
+    for group in groups:
+        for point in group.points():
+            tip = group.opts['tip'](point.pos().x(), point.pos().y(), point.data())
+            assert f'{float(point.data()):.8g} Гц' in tip
+    assert 'Выше 100 кГц (исключены)' in [g.opts['name'] for g in groups]
+    app.processEvents()
+    plot.show_result(None)
+    assert plot.plotItem.vb.toolTip() == ''
+    plot.close()
 
 
 def wait_worker(window):
@@ -66,6 +114,21 @@ def test_mapping_preview(app,tmp_path):
     dialog.validate()
     assert dialog.mapping.imag == 2
     dialog.close()
+
+
+def test_cancel_while_waiting_for_mapping_keeps_pending_row(app,tmp_path,monkeypatch):
+    path = tmp_path/'unknown_columns.txt'
+    path.write_text('1000 12 -1\n100 20 -3\n10 30 -2',encoding='utf-8')
+    window = MainWindow()
+    window.show()
+    window.add_paths([path])
+    monkeypatch.setattr(window,'map_columns',lambda table: window.cancel())
+    window.process_all()
+    wait_worker(window)
+    assert window.results[0].status == 'Не обработан'
+    assert not window.results[0].reasons
+    assert 'отменена' in window.statusBar().currentMessage()
+    window.close()
 
 
 def test_process_only_selected_and_preserve_manual_range(app,tmp_path):
@@ -138,3 +201,83 @@ def test_table_precision_does_not_round_export(app,tmp_path):
         for actual,expected in zip(rows[1][1:-2],before[1:-2]):
             assert actual=='N/A' if expected is None else float(actual)==expected
     window.close()
+
+
+def test_selected_export_uses_selected_rows_for_tables_and_png(app,tmp_path,monkeypatch):
+    import csv
+    from openpyxl import load_workbook
+    from PySide6.QtWidgets import QFileDialog, QMessageBox, QDialog
+    from ui.dialogs import ExportDialog
+    from eis.fitter import fit_arc
+
+    source = Path(__file__).resolve().parents[1]/'examples/01_clean_arc.txt'
+    spectrum = read_spectrum(source)
+    used = spectrum.eligible
+    fit = fit_arc(spectrum.frequency[used], spectrum.z[used])
+    window = MainWindow()
+    window.show()
+    for row in range(3):
+        r = Result(tmp_path/f'measurement_{row}.txt', spectrum=spectrum, used=used, fit=fit, status='OK')
+        window.results.append(r)
+        window.table.insertRow(row)
+        window.update_row(row,r)
+    window.table.setCurrentCell(1,0)
+    window.table.clearSelection()
+    mode = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+    for row in (0,2):
+        window.table.selectionModel().select(window.table.model().index(row,0),mode)
+
+    def accept_export(dialog):
+        dialog.name.setText('Summary.v1')
+        for box in dialog.formats.values():
+            box.setChecked(True)
+        dialog.plots.setChecked(True)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ExportDialog,'exec',accept_export)
+    monkeypatch.setattr(QFileDialog,'getExistingDirectory',lambda *args: str(tmp_path))
+    monkeypatch.setattr(QMessageBox,'information',lambda *args: None)
+    monkeypatch.setattr(QMessageBox,'warning',lambda *args: pytest.fail(str(args)))
+    button = next(b for b in window.findChildren(QPushButton) if b.text()=='Экспортировать выбранные')
+    button.click()
+    expected = ['measurement_0.txt','measurement_2.txt']
+    for fmt, delimiter in [('csv',','),('txt','\t')]:
+        with (tmp_path/f'Summary.v1.{fmt}').open(encoding='utf-8-sig',newline='') as stream:
+            assert [r[0] for r in list(csv.reader(stream,delimiter=delimiter))[1:]] == expected
+    book = load_workbook(tmp_path/'Summary.v1.xlsx',read_only=True)
+    assert [r[0] for r in book.active.iter_rows(min_row=2,values_only=True)] == expected
+    book.close()
+    assert len(list((tmp_path/'plots').glob('*.png'))) == 2
+    assert not any('measurement_1' in p.name for p in (tmp_path/'plots').glob('*.png'))
+    # Rejecting replacement must preserve the existing selected export.
+    existing = (tmp_path/'Summary.v1.csv').read_bytes()
+    monkeypatch.setattr(QMessageBox,'question',lambda *args: QMessageBox.StandardButton.No)
+    window.export()
+    assert (tmp_path/'Summary.v1.csv').read_bytes() == existing
+    # General export still includes all three rows.
+    monkeypatch.setattr(QMessageBox,'question',lambda *args: QMessageBox.StandardButton.Yes)
+    window.export()
+    with (tmp_path/'Summary.v1.csv').open(encoding='utf-8-sig',newline='') as stream:
+        assert len(list(csv.reader(stream))) == 4
+    window.table.clearSelection()
+    monkeypatch.setattr(ExportDialog,'exec',lambda *args: pytest.fail('Empty selection opened export'))
+    button.click()
+    assert 'Выделите' in window.statusBar().currentMessage()
+    window.close()
+
+
+def test_plot_resets_after_extreme_extrapolation_and_handles_unrepresentable_peak(app):
+    s = Spectrum(Path('ranges.txt'), np.geomspace(1e5,1,20),
+                 np.linspace(12,100,20)-1j*np.linspace(1,50,20), np.ones(20,bool))
+    plot = NyquistPlot()
+    plot.resize(900,650)
+    plot.show()
+    for rp,q,n in [(1e12,1e-4,.5), (240.,2e-4,.85), (240.,1e-20,1e-6)]:
+        fit = Fit(np.array([12.,rp,q,n]),None,0.,np.zeros(20,complex),1.,False)
+        plot.show_result(Result(s.path,spectrum=s,used=s.eligible,fit=fit))
+        app.processEvents()
+        if rp == 240:
+            assert max(abs(v) for axis in plot.viewRange() for v in axis) < 10000
+        assert np.all(np.isfinite(plot.viewRange()))
+    plot.reset_view()
+    plot.close()

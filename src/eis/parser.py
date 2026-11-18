@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
 from .types import Spectrum
+from . import config as C
 
 
 @dataclass(frozen=True)
@@ -189,6 +190,7 @@ def spectrum_from_table(table, mapping=None):
     data = data[np.argsort(-data[:, 0], kind='stable')]
     z = data[:, 1] + 1j * data[:, 2]
     notes = [f'Кодировка: {table.encoding}; пропущено строк: {dropped}; точных дубликатов: {duplicates}.',
+             f'Точек выше {C.MAX_FIT_FREQUENCY_HZ / 1000:g} кГц, исключённых из обработки: {np.sum(data[:, 0] > C.MAX_FIT_FREQUENCY_HZ)}.',
              f'Индуктивных точек ниже оси, исключённых из fit: {np.sum(z.imag > 0)}.']
     if is_smartstat_export(table.headers):
         interpretation = '−Im(Z)' if mapping.negative_imag else 'Im(Z)'

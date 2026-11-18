@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, Q
     QLabel, QProgressBar, QMessageBox, QDialog)
 from eis.types import Result
 from eis import config as C
-from eis.exporter import export_summary
+from eis.exporter import export_summary, export_path
 from .plotting import NyquistPlot, export_plots
 from .dialogs import MappingDialog, ExportDialog
 from .worker import AnalysisWorker
@@ -23,6 +23,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         self.results, self.mappings = [], {}
         self.worker = None
+        self.cancel_requested = False
         self.first_point = None
         self.range_row = None
         central = QWidget()
@@ -35,7 +36,8 @@ class MainWindow(QMainWindow):
                               ('Обработать все',self.process_all),
                               ('Удалить выбранные',self.remove_selected),
                               ('Удалить все',self.clear_files),
-                              ('Экспорт',self.export)]:
+                              ('Экспорт',self.export),
+                              ('Экспортировать выбранные',self.export_selected)]:
             button = QPushButton(label)
             button.clicked.connect(action)
             top.addWidget(button)
@@ -130,7 +132,8 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole,value)
             if 1 <= column <= 8:
                 item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            item.setToolTip(str(result.path) + '\n' + '\n'.join(result.reasons))
+            item.setToolTip(str(result.path) + '\n' + '\n'.join(result.reasons) +
+                            ('\nПримечания:\n' + '\n'.join(result.notes) if result.notes else ''))
             if column == 9 and result.status not in ('OK','Не обработан'):
                 item.setForeground(QColor('#a45100'))
             self.table.setItem(index,column,item)
@@ -153,6 +156,8 @@ class MainWindow(QMainWindow):
                     f = r.spectrum.frequency[r.used]
                     detail.append(f'Диапазон fit: {max(f):.6g} → {min(f):.6g} Гц; {len(r.used)} точек.')
             detail += r.reasons
+            if r.notes:
+                detail += ['Примечания:', *r.notes]
             self.details.setText('\n'.join(detail))
         else:
             self.plot.show_result(None)
@@ -190,6 +195,7 @@ class MainWindow(QMainWindow):
     def start_jobs(self,jobs):
         if self.worker or not jobs:
             return
+        self.cancel_requested = False
         self.plot.selecting = False
         for button in self.busy_buttons:
             button.setEnabled(False)
@@ -219,13 +225,14 @@ class MainWindow(QMainWindow):
         for button in self.busy_buttons:
             button.setEnabled(True)
         self.cancel_button.setEnabled(False)
-        was_cancelled = self.worker.cancelled()
+        was_cancelled = self.cancel_requested
         self.worker.deleteLater()
         self.worker = None
         self.statusBar().showMessage('Обработка отменена; завершённые результаты сохранены.' if was_cancelled else 'Обработка завершена.')
 
     def cancel(self):
         if self.worker:
+            self.cancel_requested = True
             self.worker.requestInterruption()
             self.worker.mapping_event.set()
 
@@ -256,7 +263,7 @@ class MainWindow(QMainWindow):
             self.start_jobs([(row,r.path,r.spectrum,None)])
 
     def reset_view(self):
-        self.plot.autoRange()
+        self.plot.reset_view()
 
     def move(self,step):
         if self.results:
@@ -270,9 +277,21 @@ class MainWindow(QMainWindow):
                 break
 
     def export(self):
-        if not self.results:
+        self.export_results(self.results, 'Экспорт результатов')
+
+    def export_selected(self):
+        rows = sorted({index.row() for index in self.table.selectedIndexes()})
+        if not rows:
+            self.statusBar().showMessage('Выделите одну или несколько строк для экспорта.')
+            return
+        results = [self.results[row] for row in rows]
+        self.export_results(results, 'Экспорт выбранных результатов')
+
+    def export_results(self, results, dialog_title):
+        if not results:
             return
         dialog = ExportDialog(self)
+        dialog.setWindowTitle(dialog_title)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         formats = [f for f,box in dialog.formats.items() if box.isChecked()]
@@ -284,14 +303,14 @@ class MainWindow(QMainWindow):
         if not directory:
             return
         destination = Path(directory)/name
-        targets = [destination.with_suffix('.'+f) for f in formats]
+        targets = [export_path(destination,f) for f in formats]
         if any(p.exists() for p in targets):
             if QMessageBox.question(self,'Экспорт','Таблица с таким именем уже существует. Заменить?') != QMessageBox.StandardButton.Yes:
                 return
         try:
-            paths = export_summary(self.results,destination,formats)
+            paths = export_summary(results,destination,formats)
             if dialog.plots.isChecked():
-                export_plots(self.results,Path(directory)/'plots')
+                export_plots(results,Path(directory)/'plots')
             QMessageBox.information(self,'Экспорт','Сохранено:\n'+'\n'.join(str(p) for p in paths))
         except Exception as exc:
             QMessageBox.warning(self,'Ошибка экспорта',f'Не удалось завершить экспорт: {exc}')

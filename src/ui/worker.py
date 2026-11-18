@@ -48,6 +48,8 @@ class AnalysisWorker(QThread):
                             while not self.mapping_event.wait(0.1):
                                 if self.cancelled():
                                     raise InterruptedError()
+                            if self.cancelled():
+                                raise InterruptedError()
                             if self.mapping_reply is None:
                                 raise ValueError('Сопоставление столбцов отменено пользователем.')
                             table, mapping = self.mapping_reply

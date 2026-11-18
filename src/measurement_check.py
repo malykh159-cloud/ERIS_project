@@ -65,7 +65,7 @@ def run_measurement_check(app,window,source,destination):
                      'c_eff_F':r.fit.c_eff,'c_eff_se_F':r.fit.c_eff_se,
                      'f_max_Hz':r.fit.f_max,'f_max_se_Hz':r.fit.f_max_se,
                      'noise_threshold_relative':r.noise_threshold,
-                     'chi2':r.fit.chi2,'notes':r.spectrum.notes,'reasons':r.reasons})
+                     'chi2':r.fit.chi2,'notes':r.spectrum.notes,'analysis_notes':r.notes,'reasons':r.reasons})
     # Exercise a manual interval on the first measurement, then restore its auto result.
     window.table.setCurrentCell(0,0)
     eligible = np.setdiff1d(window.results[0].spectrum.eligible,window.results[0].noise_indices)

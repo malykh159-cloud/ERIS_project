@@ -13,11 +13,11 @@ def fit_arc(frequency, z, seed=None, robust_scale=None):
     scale = np.maximum(np.abs(z), np.finfo(float).tiny)
 
     def unpack(t):
-        return np.r_[np.exp(t[:3]), t[3]]
+        return np.concatenate((np.exp(t[:3]), t[3:4]))
 
     def residual(t):
         dz = (z - impedance(f, *unpack(t))) / scale
-        return np.r_[dz.real, dz.imag]
+        return np.concatenate((dz.real, dz.imag))
 
     rs = max(float(np.min(z.real)) * 0.8, float(np.max(scale)) * 1e-6)
     rp = max(float(np.ptp(z.real)), 2 * float(np.max(-z.imag)), rs * 0.1)

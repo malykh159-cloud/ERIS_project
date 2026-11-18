@@ -17,14 +17,7 @@ class Interference:
     warning: str = ''
 
 
-def local_scatter(spectrum):
-    indices = spectrum.eligible
-    if len(indices) < C.INTERFERENCE_TREND_SIZE + 2:
-        return Interference()
-    f,z = spectrum.frequency[indices],spectrum.z[indices]
-    band = (f >= C.INTERFERENCE_LOW_HZ) & (f <= C.INTERFERENCE_HIGH_HZ)
-    if np.sum(band) < C.INTERFERENCE_MIN_POINTS:
-        return Interference()
+def local_deviation(f, z):
     x = np.log(f)
     denominator = x[2:]-x[:-2]
     weight = np.divide(x[1:-1]-x[:-2],denominator,out=np.zeros_like(denominator),where=denominator!=0)
@@ -33,8 +26,18 @@ def local_scatter(spectrum):
     # Second-order curvature evolves smoothly for a clean arc/tail. Subtract its
     # running median so curvature itself is not classified as mains interference.
     trend = median_filter(local.real,size=C.INTERFERENCE_TREND_SIZE,mode='nearest') + 1j*median_filter(local.imag,size=C.INTERFERENCE_TREND_SIZE,mode='nearest')
-    deviation = abs(local-trend)
-    valid = denominator != 0
+    return abs(local-trend), denominator != 0
+
+
+def local_scatter(spectrum):
+    indices = spectrum.eligible
+    if len(indices) < C.INTERFERENCE_TREND_SIZE + 2:
+        return Interference()
+    f,z = spectrum.frequency[indices],spectrum.z[indices]
+    band = (f >= C.INTERFERENCE_LOW_HZ) & (f <= C.INTERFERENCE_HIGH_HZ)
+    if np.sum(band) < C.INTERFERENCE_MIN_POINTS:
+        return Interference()
+    deviation, valid = local_deviation(f, z)
     inside = band[1:-1] & valid
     reference = deviation[(~band[1:-1]) & valid & (f[1:-1] <= C.AUTO_BOUNDARY_MAX_HZ)]
     threshold = C.INTERFERENCE_REL_FLOOR
