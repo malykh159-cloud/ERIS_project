@@ -6,19 +6,23 @@ def requires_far_extrapolation(fit, z):
     return fit.rp > C.MAX_EXTRAPOLATION_RATIO * max(np.ptp(z.real), np.finfo(float).tiny)
 
 
-def assess(fit, frequency, z, drift=0.0, notes=None):
+def assess(fit, frequency, z, drift=0.0, notes=None, *, sangbay=False):
     notes = [] if notes is None else notes
     reasons = []
-    if fit.c_eff is None or fit.f_max is None:
+    if not sangbay and (fit.c_eff is None or fit.f_max is None):
         reasons.append('Эффективная ёмкость или частота максимума не представимы численно; проверьте модель и диапазон.')
     if len(z) < C.MIN_RELIABLE_POINTS:
         notes.append("Менее 12 точек в fit; надёжность оценивается по неопределённости, экстраполяции и устойчивости параметров.")
     if fit.se is None:
         reasons.append("Ковариация плохо обусловлена; стандартная ошибка недоступна.")
-    elif fit.se[1] / fit.rp > C.MAX_RELATIVE_RP_SE:
-        reasons.append("Rp определяется с большой относительной неопределённостью.")
+    elif fit.se[1] > C.MAX_RELATIVE_RP_SE * fit.rp:
+        label = 'R' if len(fit.params) == 8 else 'Rp'
+        reasons.append(f"{label} определяется с большой относительной неопределённостью.")
+    if sangbay and fit.se is not None and np.any(fit.se[4:] > C.MAX_RELATIVE_RP_SE * fit.params[4:]):
+        reasons.append('Параметры диффузионной линии определяются с большой относительной неопределённостью.')
     if fit.chi2 > C.MAX_CHI2:
-        reasons.append("Модель одной дуги плохо описывает данные: повышенные комплексные остатки.")
+        reasons.append("Модель Sangbay плохо описывает данные: повышенные комплексные остатки."
+                       if sangbay else "Модель одной дуги плохо описывает данные: повышенные комплексные остатки.")
     if fit.boundary:
         reasons.append("Параметр достиг границы допустимого диапазона.")
     if not fit.stable:
@@ -27,7 +31,7 @@ def assess(fit, frequency, z, drift=0.0, notes=None):
         reasons.append("Rp сильно меняется при небольшом изменении диапазона.")
     if np.log10(max(frequency) / min(frequency)) < C.MIN_LOG_SPAN:
         reasons.append("Слишком короткий частотный диапазон.")
-    if requires_far_extrapolation(fit, z):
+    if not sangbay and requires_far_extrapolation(fit, z):
         reasons.append("Правая часть дуги почти не измерена; Rp требует далёкой экстраполяции.")
     # Detect systematic structure only above numerical/very-small-noise floor.
     for residual in (fit.residual.real, fit.residual.imag):

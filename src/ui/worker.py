@@ -10,9 +10,11 @@ class AnalysisWorker(QThread):
     progress = Signal(int, int)
     mapping_needed = Signal(object)
 
-    def __init__(self, jobs, mappings, parent=None):
+    def __init__(self, jobs, mappings, parent=None, *, sangbay=False, boundary_cpe=False):
         super().__init__(parent)
         self.jobs = jobs
+        self.sangbay = sangbay
+        self.boundary_cpe = boundary_cpe
         self.mappings = dict(mappings)
         self.mapping_event = Event()
         self.mapping_reply = None
@@ -58,14 +60,18 @@ class AnalysisWorker(QThread):
                     except InterruptedError:
                         raise
                     except Exception as exc:
-                        result = Result(path, status='Ошибка импорта', reasons=[str(exc)])
+                        result = Result(path, status='Ошибка импорта', reasons=[str(exc)],
+                                        sangbay=self.sangbay, boundary_cpe=self.boundary_cpe)
                         self.completed.emit(index,result)
                         self.progress.emit(count,len(self.jobs))
                         continue
-                result = analyze(spectrum, manual, self.cancelled)
+                result = (analyze(spectrum, None, self.cancelled, sangbay=True,
+                                  boundary_cpe=self.boundary_cpe) if self.sangbay
+                          else analyze(spectrum, manual, self.cancelled))
                 self.completed.emit(index,result)
             except InterruptedError:
                 break
             except Exception as exc:
-                self.completed.emit(index,Result(path,status='Ошибка фитирования',reasons=[str(exc)]))
+                self.completed.emit(index, Result(path, status='Ошибка фитирования', reasons=[str(exc)],
+                                                   sangbay=self.sangbay, boundary_cpe=self.boundary_cpe))
             self.progress.emit(count,len(self.jobs))

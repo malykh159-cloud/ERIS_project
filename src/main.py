@@ -3,15 +3,23 @@ import os
 if '--smoke-test' in sys.argv or '--check-data' in sys.argv:
     os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from PySide6.QtWidgets import QApplication
-from ui.window import MainWindow
+from ui.window import SensorWindow
 
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName('EISArcFit')
     app.setStyle('Fusion')
-    window = MainWindow()
-    window.show()
+    shell = SensorWindow()
+    shell.show()
+    boundary_cpe = '--boundary-cpe' in sys.argv
+    sensor = 'Sangbay' if '--sangbay' in sys.argv or boundary_cpe else 'DD-alphasense'
+    shell.selector.setCurrentText(sensor)
+    window = shell.workspaces[sensor]
+    if boundary_cpe:
+        window.model_selector.setCurrentIndex(1)
+    elif '--sangbay' in sys.argv:
+        window.model_selector.setCurrentIndex(0)
     if '--check-data' in sys.argv:
         from measurement_check import run_measurement_check
         from pathlib import Path
@@ -19,7 +27,7 @@ def main():
         destination = Path(sys.argv[sys.argv.index('--output')+1])
         try:
             run_measurement_check(app,window,source,destination)
-            window.close()
+            shell.close()
             return 0
         except Exception:
             import traceback
@@ -32,7 +40,7 @@ def main():
         destination = Path(sys.argv[sys.argv.index('--smoke-test') + 1])
         try:
             run_smoke(app, window, destination)
-            window.close()
+            shell.close()
             return 0
         except Exception:
             import traceback

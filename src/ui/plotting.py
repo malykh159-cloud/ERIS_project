@@ -5,7 +5,6 @@ import numpy as np
 import pyqtgraph as pg
 import pyqtgraph.exporters
 from PySide6.QtCore import Qt, Signal
-from eis.model import impedance
 from eis import config as C
 
 pg.setConfigOptions(antialias=True, background='w', foreground='#25364a')
@@ -56,18 +55,25 @@ class NyquistPlot(pg.PlotWidget):
         if result.fit:
             fit = result.fit
             f = s.frequency[used]
-            curve = impedance(np.geomspace(max(f), min(f), 500), *fit.params)
+            curve = fit.predict(np.geomspace(max(f), min(f), 500))
             self.plot(curve.real, -curve.imag, pen=pg.mkPen('#c33b46', width=2), name='Модель в диапазоне fit')
+            if result.boundary_cpe:
+                self.plot([fit.rs], [0], pen=None, symbol='d', symbolSize=9, symbolBrush='#5b3888', name='Rs')
+                self.reset_view()
+                return
             # Extrapolate relative to model corner, so the intercept remains visible for incomplete arcs.
             corner = fit.f_max
             lower = min(f) * 1e-5
             if corner is not None:
                 lower = min(lower, corner * 1e-6)
             lower = max(lower, np.finfo(float).tiny)
-            ext = impedance(np.geomspace(min(f), lower, 500), *fit.params)
+            if result.sangbay:
+                lower = max(np.finfo(float).tiny, min(lower, 1 / (2 * np.pi * fit.b**2) * 1e-6))
+            ext = fit.predict(np.geomspace(min(f), lower, 500))
             self.plot(ext.real, -ext.imag, pen=pg.mkPen('#c33b46', width=2, style=Qt.PenStyle.DashLine), name='Экстраполяция')
-            self.plot([fit.rs, fit.rs + fit.rp], [0, 0], pen=None, symbol='d', symbolSize=9, symbolBrush='#5b3888')
-            for x, label in [(fit.rs, 'Rs'), (fit.rs + fit.rp, 'Rs + Rp')]:
+            right = fit.rs + fit.rp + (fit.rd if result.sangbay else 0)
+            self.plot([fit.rs, right], [0, 0], pen=None, symbol='d', symbolSize=9, symbolBrush='#5b3888')
+            for x, label in [(fit.rs, 'Rs'), (right, 'Rs + Rp + R_D' if result.sangbay else 'Rs + Rp')]:
                 text = pg.TextItem(label, color='#5b3888', anchor=(0.5, 0))
                 text.setPos(x, 0)
                 self.addItem(text)

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QApplication,QPushButton
 from PySide6.QtCore import QEventLoop,QTimer,QItemSelectionModel,QCoreApplication,QEvent
 from eis.parser import read_spectrum,inspect_text
 from eis.window_detection import analyze
-from ui.window import MainWindow
+from ui.window import MainWindow, SensorWindow
 from ui.dialogs import MappingDialog
 from ui.plotting import export_plots
 from eis.types import Result,Fit
@@ -281,3 +281,46 @@ def test_plot_resets_after_extreme_extrapolation_and_handles_unrepresentable_pea
         assert np.all(np.isfinite(plot.viewRange()))
     plot.reset_view()
     plot.close()
+
+def test_sensor_selector_preserves_independent_file_lists(app):
+    window = SensorWindow()
+    try:
+        dd = window.workspaces['DD-alphasense']
+        sangbay = window.workspaces['Sangbay']
+        path = Path('examples/01_clean_arc.txt')
+        dd.add_paths([path])
+        window.selector.setCurrentText('Sangbay')
+        assert window.pages.currentWidget() is sangbay
+        assert not sangbay.results
+        sangbay.add_paths([path])
+        assert sangbay.results[0].sangbay
+        assert sangbay.boundary_cpe
+        window.selector.setCurrentText('DD-alphasense')
+        assert window.pages.currentWidget() is dd
+        assert len(dd.results) == 1 and not dd.results[0].sangbay
+    finally:
+        window.close()
+
+
+def test_sangbay_schemes_share_files_and_restore_model_results(app):
+    window = MainWindow(sangbay=True)
+    try:
+        assert window.model_selector.currentIndex() == 1
+        window.model_selector.setCurrentIndex(0)
+        window.add_paths([Path('examples/01_clean_arc.txt')])
+        original = window.results[0]
+        original.notes.append('Результат первой схемы')
+        window.model_selector.setCurrentIndex(1)
+        assert window.results[0].path == original.path
+        assert window.results[0].boundary_cpe
+        assert window.table.horizontalHeaderItem(7).text().startswith('QT')
+        assert window.table.columnCount() == 10
+        window.model_selector.setCurrentIndex(0)
+        assert window.results[0] is original
+        assert window.table.horizontalHeaderItem(5).text() == 'B, √с'
+        assert window.table.columnCount() == 8
+        window.clear_files()
+        window.model_selector.setCurrentIndex(1)
+        assert not window.results
+    finally:
+        window.close()

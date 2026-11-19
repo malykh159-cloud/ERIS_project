@@ -100,9 +100,12 @@ def isolated_suspects(f, z, fit):
     return np.flatnonzero(valid & (deviation > local_limit) & isolated) + 1
 
 
-def analyze(spectrum, manual=None, cancelled=lambda: False):
-    result = Result(spectrum.path, spectrum=spectrum, manual=manual is not None)
-    interference = detect_interference(spectrum,manual,cancelled)
+def analyze(spectrum, manual=None, cancelled=lambda: False, *, sangbay=False, boundary_cpe=False):
+    sangbay = sangbay or boundary_cpe
+    result = Result(spectrum.path, spectrum=spectrum, manual=manual is not None,
+                    sangbay=sangbay, boundary_cpe=boundary_cpe)
+    interference = (detect_interference(spectrum, manual, cancelled, sangbay=True, boundary_cpe=boundary_cpe)
+                    if sangbay else detect_interference(spectrum,manual,cancelled))
     result.noise_indices = interference.excluded
     result.noise_suspects = interference.suspects
     result.noise_threshold = interference.threshold if len(interference.excluded) else None
@@ -122,6 +125,12 @@ def analyze(spectrum, manual=None, cancelled=lambda: False):
         result.reasons.append(f"Осталось {len(f)} точек; требуется минимум {C.MIN_POINTS}.")
         return result
     try:
+        if sangbay:
+            result.fit = fit_arc(f, z, sangbay=True, boundary_cpe=boundary_cpe, cancelled=cancelled)
+            result.used = eligible
+            result.reasons.extend(assess(result.fit, f, z, notes=result.notes, sangbay=True))
+            result.status = 'Проверьте диапазон' if result.reasons else 'OK'
+            return result
         second_arc = False
         if manual is not None:
             best = fit_arc(f, z)

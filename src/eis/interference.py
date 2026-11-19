@@ -5,6 +5,7 @@ from scipy.ndimage import median_filter
 from . import config as C
 from .fitter import fit_arc
 from .model import impedance
+from . import sangbay_model
 from .geometry import tail_candidate
 
 
@@ -52,9 +53,9 @@ def local_scatter(spectrum):
     return Interference(indices[band],suspects,peak,threshold)
 
 
-def curve_distance(f,z,params):
+def curve_distance(f,z,params, *, model=impedance):
     """Relative shortest distance to a model Nyquist polyline, not to the nearest frequency."""
-    curve = impedance(np.geomspace(max(f),min(f),C.INTERFERENCE_CURVE_POINTS),*params)
+    curve = model(np.geomspace(max(f),min(f),C.INTERFERENCE_CURVE_POINTS),*params)
     start,delta = curve[:-1],np.diff(curve)
     length2 = np.maximum(abs(delta)**2,np.finfo(float).tiny)
     vectors = z[:,None]-start[None,:]
@@ -63,7 +64,7 @@ def curve_distance(f,z,params):
     return distance/np.maximum(abs(z),np.finfo(float).tiny)
 
 
-def detect_interference(spectrum,manual=None,cancelled=lambda:False):
+def detect_interference(spectrum,manual=None,cancelled=lambda:False, *, sangbay=False, boundary_cpe=False):
     local = local_scatter(spectrum)
     if not len(local.excluded):
         return local
@@ -71,7 +72,7 @@ def detect_interference(spectrum,manual=None,cancelled=lambda:False):
     if manual is not None:
         a,b = sorted(manual)
         indices = indices[(indices>=a)&(indices<=b)]
-    else:
+    elif not sangbay:
         # The entire band is used ONLY as a provisional reference exclusion,
         # never as the final point mask. It protects the initial shape search.
         quiet = np.setdiff1d(indices,local.excluded)
@@ -94,9 +95,15 @@ def detect_interference(spectrum,manual=None,cancelled=lambda:False):
             keep = ~excluded
             if sum(keep)<C.MIN_POINTS:
                 return Interference(suspects=local.suspects,warning='Отбор выбросов оставляет слишком мало точек; точки сохранены для ручной проверки.')
-            reference = fit_arc(f[keep],z[keep],seed,robust_scale=C.INTERFERENCE_ROBUST_SCALE)
+            if sangbay:
+                reference = fit_arc(f[keep], z[keep], seed, C.INTERFERENCE_ROBUST_SCALE,
+                                    sangbay=True, boundary_cpe=boundary_cpe, cancelled=cancelled)
+            else:
+                reference = fit_arc(f[keep],z[keep],seed,robust_scale=C.INTERFERENCE_ROBUST_SCALE)
             seed = reference.params
-            distance = curve_distance(f,z,reference.params)
+            model = sangbay_model.boundary_impedance if boundary_cpe else sangbay_model.impedance
+            distance = (curve_distance(f,z,reference.params,model=model)
+                        if sangbay else curve_distance(f,z,reference.params))
             background = distance[~band]
             threshold = C.INTERFERENCE_MODEL_REL_FLOOR
             if len(background):
